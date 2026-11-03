@@ -1,0 +1,107 @@
+name: Build F-Linux ISO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore: ['**.md']
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      T2_DIR: /mnt/work/t2sde
+    defaults:
+      run:
+        working-directory: F-Linux-10.0-Independent-Aero-Horizon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Giải nén project.zip
+        working-directory: .
+        run: |
+          unzip -q project.zip
+          ls -la F-Linux-10.0-Independent-Aero-Horizon
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          sudo mkdir -p /mnt/work && sudo chown "$USER":"$USER" /mnt/work
+          df -h / /mnt
+
+      - name: Install build dependencies
+        run: bash scripts/install-ubuntu-build-deps.sh
+
+      - name: Bootstrap T2 and install the flinux target
+        run: |
+          bash scripts/bootstrap-t2.sh
+          for f in "$T2_DIR/config/flinux/pkgsel" "$T2_DIR/target/flinux/pkgsel"; do
+            [ -f "$f" ] && sed -i -E '/^X (firefox|mpv|blueman|bluez|ristretto|mousepad|noto-emoji-fonts)$/d' "$f"
+          done
+          echo '--- config/flinux/pkgsel ---'; cat "$T2_DIR/config/flinux/pkgsel" || true
+
+      - name: T2 config (không cần bấm menu)
+        working-directory: /mnt/work/t2sde
+        run: |
+          mkdir -p config/flinux
+          cat >> config/flinux/config <<'CFG'
+          SDECFG_TARGET='flinux'
+          SDECFG_ARCH='x86-64'
+          SDECFG_PKGFILE_TYPE='tar.zst'
+          CFG
+          (sudo ./t2 config -cfg flinux -accept-defaults \
+            || yes '' | sudo ./t2 config -cfg flinux) 2>&1 | tail -n 60
+          ls -la config/flinux/
+          test -s config/flinux/config   || { echo 'T2 config không tạo được config/flinux/config'; exit 1; }
+          test -s config/flinux/packages || { echo 'T2 config không tạo được config/flinux/packages'; exit 1; }
+          echo "Số gói được chọn: $(grep -c '^X' config/flinux/packages)"
+
+      - name: Download sources
+        timeout-minutes: 60
+        working-directory: /mnt/work/t2sde
+        run: sudo ./t2 download -cfg flinux -required 2>&1 | tee /mnt/work/download.log
+
+      - name: Build target from source
+        timeout-minutes: 270
+        working-directory: /mnt/work/t2sde
+        run: sudo ./t2 build-target -cfg flinux 2>&1 | tee /mnt/work/build.log
+
+      - name: Create live ISO
+        timeout-minutes: 20
+        working-directory: /mnt/work/t2sde
+        run: |
+          sudo ./t2 create-iso F-Linux-10.0-Aero-Horizon-amd64 flinux 2>&1 | tee /mnt/work/iso.log
+          mkdir -p /mnt/work/dist
+          sudo cp F-Linux-10.0-Aero-Horizon-amd64*.iso /mnt/work/dist/
+          cd /mnt/work/dist && sudo sha256sum *.iso | sudo tee SHA256SUMS
+          ls -lh /mnt/work/dist
+
+      - name: Collect error logs
+        if: always()
+        working-directory: /mnt/work/t2sde
+        run: |
+          mkdir -p /mnt/work/logs
+          cp /mnt/work/*.log /mnt/work/logs/ 2>/dev/null || true
+          sudo ./t2 list-errors > /mnt/work/logs/list-errors.txt 2>&1 || true
+          sudo chmod -R a+r /mnt/work/logs
+          df -h / /mnt > /mnt/work/logs/disk.txt
+
+      - name: Upload ISO
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: F-Linux-ISO
+          path: /mnt/work/dist/*
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: /mnt/work/logs/*
+          retention-days: 14
