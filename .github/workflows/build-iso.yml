@@ -53,11 +53,24 @@ jobs:
           SDECFG_ARCH='x86-64'
           SDECFG_PKGFILE_TYPE='tar.zst'
           CFG
-          (sudo ./t2 config -cfg flinux -accept-defaults \
-            || yes '' | sudo ./t2 config -cfg flinux) 2>&1 | tail -n 60
-          ls -la config/flinux/
-          test -s config/flinux/config   || { echo 'T2 config không tạo được config/flinux/config'; exit 1; }
-          test -s config/flinux/packages || { echo 'T2 config không tạo được config/flinux/packages'; exit 1; }
+          set +e
+          ./t2 config -cfg flinux -accept-defaults 2>&1 | tail -n 40
+          if [ ! -s config/flinux/packages ]; then
+            echo '===== thử cách 2 ====='
+            yes '' | ./t2 config -cfg flinux 2>&1 | tail -n 40
+          fi
+          set -e
+          if [ ! -s config/flinux/packages ]; then
+            echo '===== DIAGNOSE ====='
+            git log -1 --format='%H %cd'
+            grep -n -e '-accept-defaults' -e '-nodefaults' scripts/Config | head
+            grep -rn 'luabash' scripts/Config t2 | head -20
+            ls -la src src/bash | head -50
+            sed -n 1,30p src/bash/Makefile
+            find . -name 'bottom.make' | head
+            echo 'T2 config không tạo được config/flinux/packages'
+            exit 1
+          fi
           echo "Số gói được chọn: $(grep -c '^X' config/flinux/packages)"
 
       - name: Download sources
